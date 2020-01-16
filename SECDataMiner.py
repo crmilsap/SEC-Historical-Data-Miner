@@ -11,13 +11,23 @@ import xlsxwriter
 import os
 import re
 import CIMGColors
-
+from math import isnan
 # Gets historical 10-K's
 
+
+"""
+123.4
+
+2.97
+297
+(2.97)
+[2.97]
+[1]
+"""
 def getDateOfFiling(dateString):
     yearStr = dateString[0:4]
     return int(yearStr)
-    
+ 
 def getDocumentsPage(ticker, filing):
     url = 'https://www.sec.gov/cgi-bin/browse-edgar?CIK=' + ticker + '&type=' + filing + '&dateb=&owner=exclude&start=0&count=40'
     sourceCode = requests.get(url)
@@ -204,9 +214,9 @@ def pullFinancialStatements(link):
         reportDictionary["url"] = baseLink + report.htmlfilename.text
     
         #These are the reports we want to pull
-        incomeStatementNames = ["consolidated statements of operations", "consolidated income statement", "income statements", "consolidated statements of income", "consolidated statements of earnings", "consolidated and sector income statement", "consolidated and sector statement of operations"]
+        incomeStatementNames = ["consolidated statements of operations", "consolidated income statement", "income statements", "consolidated statements of income", "consolidated statements of earnings", "consolidated and sector income statement", "consolidated and sector statement of operations", "statements of operations"]
         balanceSheetNames = ["consolidated statements of financial position", "consolidated balance sheet", "consolidated balance sheets", "balance sheets", "consolidated and sector balance sheet", "consolidated statements of financial condition" ]
-        cashFlowStatementNames = ["consolidated statements of cash flows", "consolidated statement of cash flows", "cash flows statements", "consolidated statements of cash flows", "consolidated and sector statement of cash flows"]
+        cashFlowStatementNames = ["consolidated statements of cash flows", "consolidated statement of cash flows", "cash flows statements", "consolidated statements of cash flows", "consolidated and sector statement of cash flows", "consolidated statements of cash flows statement"]
         desiredList = []
         desiredList.extend(incomeStatementNames)
         desiredList.extend(balanceSheetNames)
@@ -241,11 +251,13 @@ def pullFinancialStatements(link):
                 if len(row) > 1 and row.td.text != "X": # Lots of hidden rows will mess up data frame
                     regRow = []
                     regRow.append(cols[0].text.strip())
+                    
                     for e in cols[1:]:
                         e = e.text.strip()
-                        re.sub(r"[^0-9\[\(]", "", e) # Replaces all characters that are not digits, [ or ( 
-                        e = "".join(filter(lambda x: x.isdigit() or x == "(" or x == "[", e))
+                        re.sub(r"[^0-9\.\(\[]", "", e) # Replaces all characters that are not digits, [ or ( 
+                        e = "".join(filter(lambda x: x.isdigit() or x == "(" or x == "[" or x == ".", e))
                         regRow.append(e)
+                        
                                 
                     statementData["data"].append(regRow)
                 
@@ -288,11 +300,14 @@ def formatHeaderCells(formatHeader):
     
     return formatHeader
 
-def formatIndexCells(formatIndex):
-    formatIndex.set_bold()
+def formatIndexCells(formatIndex, bold):
+    
     formatIndex.set_align("right")
     formatIndex.set_right(1)
-
+    
+    if bold is True:
+        formatIndex.set_bold()
+        
     return formatIndex
 
 def formatDataCells(formatData):
@@ -304,7 +319,7 @@ def formatDataCells(formatData):
 
 def formatExcel(workbook, statementName, statementData):
     sheet = workbook.add_worksheet(statementName)
-    
+
     # Basic sheet formatting
     sheet.hide_gridlines(2)
     sheet.set_column(2, 2, 40)
@@ -320,14 +335,13 @@ def formatExcel(workbook, statementName, statementData):
     formatHeader = workbook.add_format()
     formatHeader = formatHeaderCells(formatHeader)
     formatIndex = workbook.add_format()
-    formatIndex = formatIndexCells(formatIndex)
+    formatIndex = formatIndexCells(formatIndex, False)
+    formatBoldIndex = workbook.add_format()
+    formatBoldIndex = formatIndexCells(formatBoldIndex, True)
     formatData = workbook.add_format()
     formatData = formatDataCells(formatData)
     
     # Writes title
-    sheet.insert_image(0, 0, "../../images/scriptA.png", {
-            "x_scale": 0.5, "y_scale": 0.5, "url": "https://uacimg.com"
-    })
     sheet.write("C4", title, formatTitle)
     sheet.write("D4", "", formatTitle)
     sheet.write("E4", "", formatTitle)
@@ -342,11 +356,20 @@ def formatExcel(workbook, statementName, statementData):
     # Add data
     for i, row in enumerate(statementData.iterrows()):
         name, data = row
-        
+        rowIsHeaderFlag = True
         if "- Definition" in name: #Removes a bunch of junk at the end of older files
             break
         
-        sheet.write(i + 5, 2, name, formatIndex)
+        for d in data:
+            
+            if not isnan(d):
+                rowIsHeaderFlag = False
+            
+        if rowIsHeaderFlag == True:
+            sheet.write(i + 5, 2, name, formatBoldIndex)
+        else:
+            sheet.write(i + 5, 2, name, formatIndex)
+        
     
         for j, r in enumerate(data):
             try:
@@ -356,9 +379,9 @@ def formatExcel(workbook, statementName, statementData):
                 
     return sheet
    
-def writeToExcel(ticker, statementsData, urlToDoc, filingType):
+def writeToExcel(ticker, statementsData, urlToDoc, filingType, downloadPath):
     year = statementsData["incomeStatement"].columns[0][-4:]
-    path = "../../Reports/" + ticker + "/" + year + "/"
+    path = downloadPath + "/Reports/" + ticker + "/" + year + "/"
     if filingType == "10-K":
         filename = path + ticker + "FY" + str(year)[-2:] + ".xlsx"
     else:
@@ -368,7 +391,7 @@ def writeToExcel(ticker, statementsData, urlToDoc, filingType):
     filingURL = filingURL.replace("ix?doc=", "")
     if not os.path.exists(path):
         os.makedirs(path)
-    
+        
     html = urlopen(filingURL)
     page_content = html.read()
     with open(path + filingType + ".html", "wb") as f:
@@ -381,22 +404,24 @@ def writeToExcel(ticker, statementsData, urlToDoc, filingType):
         cashFlows = formatExcel(workbook, "Cash Flows", statementsData["cashFlow"])
         
         workbook.close()
-
+    
+    return path # Returns the directory path so we can open it in the OS
 
 def companySearch(ticker, documentType = "10-K"):
     
     filingDocs = list()
-    filingDocs = getDocumentsPage(ticker, documentType)
+    filingDocs = getDocumentsPage(ticker, documentType)[0]
     length = len(filingDocs)
     for i, doc in enumerate(filingDocs):
         try:
             statementsData = pullFinancialStatements(doc)
-            writeToExcel(ticker, statementsData, doc, documentType)
+            writeToExcel(ticker, statementsData, doc, documentType, downloadPath)
             print("Progress: {}%".format( (i + 1) / length * 100))
         except AttributeError:
-            break;
+            break
+    
     print("Complete")
-companySearch("BRKB")
+
 # This code can get us the direct links to filings. Useful
 # getHTMLFiling(filingDocs[0])
 # for i in filingDocs:
